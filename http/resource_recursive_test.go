@@ -3,6 +3,7 @@ package fbhttp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/filebrowser/filebrowser/v2/settings"
 	"github.com/filebrowser/filebrowser/v2/users"
+	"github.com/spf13/afero"
 )
 
 func recursiveTestHandler(t *testing.T, userScope string) (http.Handler, string) {
@@ -77,5 +79,25 @@ func TestResourceRecursiveStopsWhenClientDisconnects(t *testing.T) {
 
 	if body := rec.Body.String(); body != "" {
 		t.Fatalf("wrote a response for a disconnected client: %q", body)
+	}
+}
+
+func TestResourceRecursiveRejectsTreesOverEntryLimit(t *testing.T) {
+	fs := afero.NewMemMapFs()
+	if err := fs.MkdirAll("/target", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"a.txt", "b.txt", "c.txt"} {
+		if err := afero.WriteFile(fs, filepath.Join("/target", name), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	entries, err := collectRecursiveEntries(context.Background(), fs, "/target", func(string) bool { return true }, 2)
+	if !errors.Is(err, errRecursiveEntryLimit) {
+		t.Fatalf("walk error = %v, want entry limit error", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("collected %d entries before hitting limit, want 2", len(entries))
 	}
 }

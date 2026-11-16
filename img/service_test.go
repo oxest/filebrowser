@@ -3,6 +3,9 @@ package img
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
+	"errors"
+	"hash/crc32"
 	"image"
 	"image/gif"
 	"image/jpeg"
@@ -15,6 +18,30 @@ import (
 	"golang.org/x/image/bmp"
 	"golang.org/x/image/tiff"
 )
+
+func TestDetectFormatRejectsImagesOverPixelBudget(t *testing.T) {
+	// A PNG header is enough for DecodeConfig; the pixel budget must be checked
+	// before the decoder allocates the full image.
+	data := []byte{137, 80, 78, 71, 13, 10, 26, 10}
+	chunk := make([]byte, 25)
+	binary.BigEndian.PutUint32(chunk[:4], 13)
+	copy(chunk[4:8], "IHDR")
+	binary.BigEndian.PutUint32(chunk[8:12], 5000)
+	binary.BigEndian.PutUint32(chunk[12:16], 5000)
+	chunk[16] = 8 // bit depth
+	chunk[17] = 6 // RGBA
+	chunk[18] = 0 // compression
+	chunk[19] = 0 // filter
+	chunk[20] = 0 // interlace
+	binary.BigEndian.PutUint32(chunk[21:25], crc32.ChecksumIEEE(chunk[4:21]))
+	data = append(data, chunk...)
+
+	service := &Service{}
+	_, _, err := service.detectFormat(bytes.NewReader(data))
+	if !errors.Is(err, ErrImageTooLarge) {
+		t.Fatalf("detectFormat error = %v, want ErrImageTooLarge", err)
+	}
+}
 
 func TestService_Resize(t *testing.T) {
 	testCases := map[string]struct {

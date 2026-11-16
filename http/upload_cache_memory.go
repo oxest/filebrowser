@@ -32,7 +32,7 @@ type UploadCache interface {
 
 	// Lock serializes writes for one upload across concurrent requests and
 	// replicas. The returned function releases the lock.
-	Lock(filePath string) (unlock func(), acquired bool, err error)
+	Lock(filePath string) (unlock func(), acquired bool, lost <-chan struct{}, err error)
 
 	// Close cleans up any resources
 	Close()
@@ -97,7 +97,7 @@ func (c *memoryUploadCache) Touch(filePath string) {
 	c.cache.Touch(filePath)
 }
 
-func (c *memoryUploadCache) Lock(filePath string) (func(), bool, error) {
+func (c *memoryUploadCache) Lock(filePath string) (func(), bool, <-chan struct{}, error) {
 	c.locksMu.Lock()
 	lock := c.locks[filePath]
 	if lock == nil {
@@ -114,7 +114,7 @@ func (c *memoryUploadCache) Lock(filePath string) (func(), bool, error) {
 			delete(c.locks, filePath)
 		}
 		c.locksMu.Unlock()
-		return nil, false, nil
+		return nil, false, nil, nil
 	}
 	return func() {
 		lock.mu.Unlock()
@@ -124,7 +124,7 @@ func (c *memoryUploadCache) Lock(filePath string) (func(), bool, error) {
 			delete(c.locks, filePath)
 		}
 		c.locksMu.Unlock()
-	}, true, nil
+	}, true, nil, nil
 }
 
 func (c *memoryUploadCache) Close() {

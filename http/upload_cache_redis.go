@@ -85,21 +85,23 @@ func (c *redisUploadCache) Touch(filePath string) {
 	}
 }
 
-func (c *redisUploadCache) Lock(filePath string) (func(), bool, error) {
+func (c *redisUploadCache) Lock(filePath string) (func(), bool, <-chan struct{}, error) {
 	var tokenBytes [16]byte
 	if _, err := rand.Read(tokenBytes[:]); err != nil {
-		return nil, false, err
+		return nil, false, nil, err
 	}
 	token := hex.EncodeToString(tokenBytes[:])
 	lockKey := c.filePathKey(filePath) + ":lock"
 	ctx := context.Background()
 	acquired, err := c.client.SetNX(ctx, lockKey, token, uploadCacheTTL).Result()
 	if err != nil || !acquired {
-		return nil, acquired, err
+		return nil, acquired, nil, err
 	}
 
 	stop := make(chan struct{})
+	lost := make(chan struct{})
 	var stopOnce sync.Once
+	var lostOnce sync.Once
 	go func() {
 		ticker := time.NewTicker(uploadCacheTTL / 3)
 		defer ticker.Stop()
@@ -114,8 +116,15 @@ func (c *redisUploadCache) Lock(filePath string) (func(), bool, error) {
 			case <-stop:
 				return
 			case <-ticker.C:
-				if err := renew.Run(ctx, c.client, []string{lockKey}, token, uploadCacheTTL.Milliseconds()).Err(); err != nil {
-					log.Printf("failed to renew upload lock: %v", err)
+				result, err := renew.Run(ctx, c.client, []string{lockKey}, token, uploadCacheTTL.Milliseconds()).Int()
+				if err != nil || result != 1 {
+					if err != nil {
+						log.Printf("failed to renew upload lock; aborting the protected operation: %v", err)
+					} else {
+						log.Printf("upload lock ownership was lost; aborting the protected operation")
+					}
+					lostOnce.Do(func() { close(lost) })
+					return
 				}
 			}
 		}
@@ -132,7 +141,7 @@ func (c *redisUploadCache) Lock(filePath string) (func(), bool, error) {
 		if err := unlock.Run(ctx, c.client, []string{lockKey}, token).Err(); err != nil {
 			log.Printf("failed to release upload lock: %v", err)
 		}
-	}, true, nil
+	}, true, lost, nil
 }
 
 func (c *redisUploadCache) Close() {

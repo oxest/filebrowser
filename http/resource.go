@@ -509,6 +509,44 @@ type RecursiveEntry struct {
 	IsDir   bool      `json:"isDir"`
 }
 
+const maxRecursiveEntries = 25_000
+
+var errRecursiveEntryLimit = errors.New("recursive listing entry limit exceeded")
+
+func collectRecursiveEntries(ctx context.Context, fs afero.Fs, rootPath string, check func(string) bool, limit int) ([]RecursiveEntry, error) {
+	entries := make([]RecursiveEntry, 0)
+	err := afero.Walk(fs, rootPath, func(fPath string, info os.FileInfo, err error) error {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		if err != nil {
+			return nil // skip entries we cannot read
+		}
+		if fPath == rootPath {
+			return nil // skip the root directory itself
+		}
+		if !check(fPath) {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if len(entries) >= limit {
+			return errRecursiveEntryLimit
+		}
+
+		entries = append(entries, RecursiveEntry{
+			Path:    filepath.ToSlash(fPath),
+			Name:    info.Name(),
+			Size:    info.Size(),
+			ModTime: info.ModTime(),
+			IsDir:   info.IsDir(),
+		})
+		return nil
+	})
+	return entries, err
+}
+
 // resourceGetRecursiveHandler returns a flat list of every file and directory
 // under the requested path, walking the tree recursively on the server side
 // so the client only needs a single HTTP call.
@@ -527,45 +565,12 @@ var resourceGetRecursiveHandler = withUser(func(w http.ResponseWriter, r *http.R
 		return http.StatusBadRequest, fmt.Errorf("path is not a directory")
 	}
 
-	entries := make([]RecursiveEntry, 0)
-
-	err = afero.Walk(d.user.Fs, rootPath, func(fPath string, info os.FileInfo, err error) error {
-		// Walking a large tree is expensive, and every entry is stat'ed through
-		// the scoped filesystem. Stop as soon as nobody is waiting for the
-		// answer instead of finishing the walk for a client that has gone.
-		if ctxErr := r.Context().Err(); ctxErr != nil {
-			return ctxErr
-		}
-
-		if err != nil {
-			return nil // skip entries we cannot read
-		}
-
-		// Skip the root directory itself.
-		if fPath == rootPath {
-			return nil
-		}
-
-		// Respect user rules.
-		if !d.Check(fPath) {
-			if info.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-
-		entries = append(entries, RecursiveEntry{
-			// afero.Walk joins paths with the OS separator, so on Windows fPath
-			// uses backslashes. The web API contract is forward slashes, so
-			// normalize it here (mirrors search/search.go).
-			Path:    filepath.ToSlash(fPath),
-			Name:    info.Name(),
-			Size:    info.Size(),
-			ModTime: info.ModTime(),
-			IsDir:   info.IsDir(),
-		})
-		return nil
-	})
+	// A recursive result is accumulated in memory before it is encoded as JSON.
+	// Bound the number of entries so a very large tree cannot exhaust memory.
+	entries, err := collectRecursiveEntries(r.Context(), d.user.Fs, rootPath, d.Check, maxRecursiveEntries)
+	if errors.Is(err, errRecursiveEntryLimit) {
+		return http.StatusRequestEntityTooLarge, nil
+	}
 	if err != nil {
 		// Once the request is done there is nobody left to answer, whatever the
 		// walk reported. Asking for a status here only produces a second header

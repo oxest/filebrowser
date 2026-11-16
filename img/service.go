@@ -24,8 +24,9 @@ var ErrImageTooLarge = errors.New("image too large for thumbnail generation")
 
 // Maximum dimensions for thumbnail generation to prevent server crashes
 const (
-	MaxImageWidth  = 10000
-	MaxImageHeight = 10000
+	MaxImageWidth         = 10000
+	MaxImageHeight        = 10000
+	MaxImagePixels uint64 = 16_000_000
 )
 
 // Service
@@ -202,9 +203,10 @@ func (s *Service) detectFormat(in io.Reader) (Format, io.Reader, error) {
 	}
 
 	// Check if image dimensions exceed maximum allowed size
-	if imgConfig.Width > MaxImageWidth || imgConfig.Height > MaxImageHeight {
-		return 0, nil, fmt.Errorf("image dimensions %dx%d exceed maximum %dx%d: %w",
-			imgConfig.Width, imgConfig.Height, MaxImageWidth, MaxImageHeight, ErrImageTooLarge)
+	if imgConfig.Width > MaxImageWidth || imgConfig.Height > MaxImageHeight ||
+		uint64(imgConfig.Width)*uint64(imgConfig.Height) > MaxImagePixels {
+		return 0, nil, fmt.Errorf("image dimensions %dx%d exceed maximum %dx%d or %d pixels: %w",
+			imgConfig.Width, imgConfig.Height, MaxImageWidth, MaxImageHeight, MaxImagePixels, ErrImageTooLarge)
 	}
 
 	format, err := ParseFormat(imgFormat)

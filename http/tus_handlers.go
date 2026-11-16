@@ -64,16 +64,48 @@ func tusCachePath(d *data, path string) (string, error) {
 	return d.user.FullPath(resolved), nil
 }
 
+func watchUploadLock(r *http.Request, lost <-chan struct{}) func() {
+	done := make(chan struct{})
+	if lost != nil {
+		go func() {
+			select {
+			case <-lost:
+				if r.Body != nil {
+					_ = r.Body.Close()
+				}
+			case <-done:
+			}
+		}()
+	}
+	return func() { close(done) }
+}
+
+func uploadLockLost(lost <-chan struct{}) bool {
+	if lost == nil {
+		return false
+	}
+	select {
+	case <-lost:
+		return true
+	default:
+		return false
+	}
+}
+
 func tusPostHandler(cache UploadCache) handleFunc {
 	return withUser(func(w http.ResponseWriter, r *http.Request, d *data) (int, error) {
 		if !d.user.Perm.Create || !d.Check(r.URL.Path) {
 			return http.StatusForbidden, nil
 		}
+		uploadLength, err := getUploadLength(r)
+		if err != nil || uploadLength < 0 {
+			return http.StatusBadRequest, fmt.Errorf("invalid upload length")
+		}
 		cachePath, err := tusCachePath(d, r.URL.Path)
 		if err != nil {
 			return errToStatus(err), err
 		}
-		unlock, acquired, err := cache.Lock(cachePath)
+		unlock, acquired, lockLost, err := cache.Lock(cachePath)
 		if err != nil {
 			return http.StatusInternalServerError, err
 		}
@@ -81,6 +113,9 @@ func tusPostHandler(cache UploadCache) handleFunc {
 			return http.StatusConflict, nil
 		}
 		defer unlock()
+		if uploadLockLost(lockLost) {
+			return http.StatusConflict, nil
+		}
 
 		file, err := files.NewFileInfo(&files.FileOptions{
 			Fs:         d.user.Fs,
@@ -122,6 +157,9 @@ func tusPostHandler(cache UploadCache) handleFunc {
 
 			fileFlags |= os.O_TRUNC
 		}
+		if uploadLockLost(lockLost) {
+			return http.StatusConflict, nil
+		}
 
 		openFile, err := d.user.Fs.OpenFile(r.URL.Path, fileFlags, d.settings.FileMode)
 		if err != nil {
@@ -142,15 +180,13 @@ func tusPostHandler(cache UploadCache) handleFunc {
 			return errToStatus(err), err
 		}
 
-		uploadLength, err := getUploadLength(r)
-		if err != nil || uploadLength < 0 {
-			return http.StatusBadRequest, fmt.Errorf("invalid upload length: %w", err)
-		}
-
 		// Enables the user to utilize the PATCH endpoint for uploading file data.
 		// The removal callback deletes an abandoned upload through the user's
 		// scoped filesystem, so eviction cannot follow a symlink out of scope.
 		uploadPath := r.URL.Path
+		if uploadLockLost(lockLost) {
+			return http.StatusConflict, nil
+		}
 		cache.Register(cachePath, uploadLength, func() error {
 			return d.user.Fs.Remove(uploadPath)
 		})
@@ -230,7 +266,7 @@ func tusPatchUpload(w http.ResponseWriter, r *http.Request, d *data, cache Uploa
 	if err != nil {
 		return errToStatus(err), err
 	}
-	unlock, acquired, err := cache.Lock(cachePath)
+	unlock, acquired, lockLost, err := cache.Lock(cachePath)
 	if err != nil {
 		return http.StatusInternalServerError, err
 	}
@@ -238,6 +274,11 @@ func tusPatchUpload(w http.ResponseWriter, r *http.Request, d *data, cache Uploa
 		return http.StatusConflict, nil
 	}
 	defer unlock()
+	stopLockWatch := watchUploadLock(r, lockLost)
+	defer stopLockWatch()
+	if uploadLockLost(lockLost) {
+		return http.StatusConflict, nil
+	}
 
 	file, err := files.NewFileInfo(&files.FileOptions{
 		Fs:         d.user.Fs,
@@ -303,7 +344,13 @@ func tusPatchUpload(w http.ResponseWriter, r *http.Request, d *data, cache Uploa
 	// client declared when the upload was created.
 	remaining := uploadLength - uploadOffset
 	bytesWritten, err := io.Copy(openFile, io.LimitReader(r.Body, remaining+1))
+	if uploadLockLost(lockLost) {
+		return http.StatusConflict, nil
+	}
 	if err != nil {
+		if uploadLockLost(lockLost) {
+			return http.StatusConflict, nil
+		}
 		return http.StatusInternalServerError, fmt.Errorf("could not write to file: %w", err)
 	}
 	if bytesWritten > remaining {
@@ -358,7 +405,7 @@ func tusDeleteHandler(cache UploadCache) handleFunc {
 		if err != nil {
 			return http.StatusNotFound, err
 		}
-		unlock, acquired, err := cache.Lock(cachePath)
+		unlock, acquired, lockLost, err := cache.Lock(cachePath)
 		if err != nil {
 			return http.StatusInternalServerError, err
 		}
@@ -366,6 +413,9 @@ func tusDeleteHandler(cache UploadCache) handleFunc {
 			return http.StatusConflict, nil
 		}
 		defer unlock()
+		if uploadLockLost(lockLost) {
+			return http.StatusConflict, nil
+		}
 
 		err = d.user.Fs.RemoveAll(r.URL.Path)
 		if err != nil {

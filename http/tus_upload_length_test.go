@@ -71,3 +71,64 @@ func TestTusPatchEnforcesUploadLength(t *testing.T) {
 		t.Fatalf("expected file content \"hello\", got %q", string(data))
 	}
 }
+
+func TestTusPostRejectsInvalidLengthBeforeMutatingFile(t *testing.T) {
+	f := newTusTestFixture(t)
+	file := filepath.Join(f.scope, "keep.txt")
+	if err := os.WriteFile(file, []byte("keep original"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	post := func(path, uploadLength string, override bool) *http.Response {
+		t.Helper()
+		target := f.srv.URL + "/api/tus/" + path
+		if override {
+			target += "?override=true"
+		}
+		req, err := http.NewRequest(http.MethodPost, target, http.NoBody)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("X-Auth", f.token)
+		if uploadLength != "" {
+			req.Header.Set("Upload-Length", uploadLength)
+		}
+		res, err := f.client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res
+	}
+
+	for _, tc := range []struct {
+		name         string
+		path         string
+		length       string
+		override     bool
+		wantExisting bool
+	}{
+		{name: "missing length does not truncate existing target", path: "keep.txt", override: true, wantExisting: true},
+		{name: "negative length does not create target", path: "new.txt", length: "-1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res := post(tc.path, tc.length, tc.override)
+			defer res.Body.Close()
+			if res.StatusCode != http.StatusBadRequest {
+				t.Fatalf("POST status = %d, want 400", res.StatusCode)
+			}
+
+			actualPath := filepath.Join(f.scope, filepath.FromSlash(tc.path))
+			content, err := os.ReadFile(actualPath)
+			if tc.wantExisting {
+				if err != nil {
+					t.Fatalf("existing file was removed: %v", err)
+				}
+				if string(content) != "keep original" {
+					t.Fatalf("existing file was changed to %q", content)
+				}
+			} else if !os.IsNotExist(err) {
+				t.Fatalf("invalid upload created a file, read error = %v", err)
+			}
+		})
+	}
+}
