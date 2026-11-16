@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -58,6 +59,73 @@ func BasePath(fs afero.Fs) *afero.BasePathFs {
 		return f
 	}
 	return nil
+}
+
+// ResolvePath returns the virtual path of the filesystem target after resolving
+// symlinks. Missing path components are appended to their nearest existing
+// ancestor, which also handles writes through dangling symlinks.
+func ResolvePath(filesystem afero.Fs, name string) (string, error) {
+	base := BasePath(filesystem)
+	if base == nil {
+		return path.Clean("/" + strings.ReplaceAll(name, "\\", "/")), nil
+	}
+
+	root, err := filepath.EvalSymlinks(afero.FullBaseFsPath(base, "/"))
+	if err != nil {
+		return "", err
+	}
+	target := afero.FullBaseFsPath(base, name)
+	var suffix []string
+
+	for hops := 0; hops <= maxSymlinkHops; {
+		resolved, resolveErr := filepath.EvalSymlinks(target)
+		if resolveErr == nil {
+			for i := len(suffix) - 1; i >= 0; i-- {
+				resolved = filepath.Join(resolved, suffix[i])
+			}
+			relative, relErr := filepath.Rel(root, resolved)
+			if relErr != nil {
+				return "", relErr
+			}
+			return "/" + filepath.ToSlash(relative), nil
+		}
+		if !errors.Is(resolveErr, fs.ErrNotExist) {
+			return "", resolveErr
+		}
+
+		info, lstatErr := os.Lstat(target)
+		if lstatErr == nil && info.Mode()&os.ModeSymlink != 0 {
+			hops++
+			if hops > maxSymlinkHops {
+				return "", os.ErrPermission
+			}
+			destination, readErr := os.Readlink(target)
+			if readErr != nil {
+				return "", readErr
+			}
+			if !filepath.IsAbs(destination) {
+				parent, parentErr := filepath.EvalSymlinks(filepath.Dir(target))
+				if parentErr != nil {
+					return "", parentErr
+				}
+				destination = filepath.Join(parent, destination)
+			}
+			target = filepath.Clean(destination)
+			continue
+		}
+		if lstatErr != nil && !errors.Is(lstatErr, fs.ErrNotExist) {
+			return "", lstatErr
+		}
+
+		parent := filepath.Dir(target)
+		if parent == target {
+			return "", resolveErr
+		}
+		suffix = append(suffix, filepath.Base(target))
+		target = parent
+	}
+
+	return "", os.ErrPermission
 }
 
 // BasePathFs returns the underlying *afero.BasePathFs.

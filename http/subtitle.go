@@ -12,6 +12,8 @@ import (
 	"github.com/filebrowser/filebrowser/v2/files"
 )
 
+const maxSubtitleSize int64 = 10 << 20 // 10 MiB
+
 var srtLineBreakTag = regexp.MustCompile(`(?i)<br(?:\s+[^>]*)?\s*/?>`)
 
 var subtitleHandler = withUser(func(w http.ResponseWriter, r *http.Request, d *data) (int, error) {
@@ -50,16 +52,34 @@ func subtitleFileHandler(w http.ResponseWriter, r *http.Request, file *files.Fil
 	}
 	defer fd.Close()
 
+	info, err := fd.Stat()
+	if err != nil {
+		return http.StatusInternalServerError, err
+	}
+	if info.Size() > maxSubtitleSize {
+		return http.StatusRequestEntityTooLarge, nil
+	}
+
+	// Limit the bytes parsed as well as checking the stat size, so a file that
+	// grows while it is being converted cannot cause an unbounded allocation.
+	limited := &io.LimitedReader{R: fd, N: maxSubtitleSize + 1}
+
 	// load subtitle for conversion to vtt
 	var sub *astisub.Subtitles
 	if strings.HasSuffix(file.Name, ".srt") {
-		content, readErr := io.ReadAll(fd)
+		content, readErr := io.ReadAll(limited)
 		if readErr != nil {
 			return http.StatusInternalServerError, readErr
 		}
+		if int64(len(content)) > maxSubtitleSize {
+			return http.StatusRequestEntityTooLarge, nil
+		}
 		sub, err = astisub.ReadFromSRT(bytes.NewReader(normalizeSRTLineBreaks(content)))
 	} else if strings.HasSuffix(file.Name, ".ass") || strings.HasSuffix(file.Name, ".ssa") {
-		sub, err = astisub.ReadFromSSA(fd)
+		sub, err = astisub.ReadFromSSA(limited)
+		if limited.N == 0 {
+			return http.StatusRequestEntityTooLarge, nil
+		}
 	}
 	if err != nil {
 		return http.StatusInternalServerError, err

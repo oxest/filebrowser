@@ -13,6 +13,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/spf13/afero"
 
+	fbAuth "github.com/filebrowser/filebrowser/v2/auth"
 	"github.com/filebrowser/filebrowser/v2/diskcache"
 	"github.com/filebrowser/filebrowser/v2/settings"
 	"github.com/filebrowser/filebrowser/v2/storage"
@@ -63,6 +64,9 @@ func TestResourceCopyDoesNotDereferenceEscapingSymlink(t *testing.T) {
 	if err := st.Settings.Save(&settings.Settings{Key: key}); err != nil {
 		t.Fatalf("failed to save settings: %v", err)
 	}
+	if err := st.Auth.SaveSession(fbAuth.Session{ID: "test-session", UserID: 1, ExpiresAt: time.Now().Add(time.Hour).Unix()}); err != nil {
+		t.Fatalf("failed to save test session: %v", err)
+	}
 	// The user's scope is the real on-disk userScope. customFSUser.Get wraps it
 	// in a ScopedFs, mirroring production (users.User init).
 	st.Users = &customFSUser{
@@ -105,10 +109,12 @@ func TestResourceCopyDoesNotDereferenceEscapingSymlink(t *testing.T) {
 func signToken(t *testing.T, perm users.Permissions, key []byte) string {
 	t.Helper()
 	claims := &authToken{
-		User: userInfo{ID: 1, Username: "u", Perm: perm},
+		User:                userInfo{ID: 1, Username: "u", Perm: perm},
+		PasswordFingerprint: passwordFingerprint("pw"),
 		RegisteredClaims: jwt.RegisteredClaims{
 			IssuedAt:  jwt.NewNumericDate(time.Now().Add(-time.Minute)),
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+			ID:        "test-session",
 		},
 	}
 	signed, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(key)
@@ -138,6 +144,9 @@ func scopedUserStorage(t *testing.T, userScope string, perm users.Permissions, k
 	}
 	if err := st.Settings.Save(&settings.Settings{Key: key}); err != nil {
 		t.Fatalf("failed to save settings: %v", err)
+	}
+	if err := st.Auth.SaveSession(fbAuth.Session{ID: "test-session", UserID: 1, ExpiresAt: time.Now().Add(time.Hour).Unix()}); err != nil {
+		t.Fatalf("failed to save test session: %v", err)
 	}
 	st.Users = &customFSUser{
 		Store: st.Users,
@@ -223,7 +232,7 @@ func TestResourcePostCleanupDoesNotDeleteThroughSymlink(t *testing.T) {
 	}
 }
 
-func TestResourcePostRunsUploadHooksForDirectories(t *testing.T) {
+func TestResourcePostIgnoresDisabledHooksForDirectories(t *testing.T) {
 	root := t.TempDir()
 	userScope := filepath.Join(root, "user")
 	if err := os.MkdirAll(userScope, 0o755); err != nil {
@@ -247,11 +256,9 @@ func TestResourcePostRunsUploadHooksForDirectories(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handle(resourcePostHandler(diskcache.NewNoOp()), "", st, &settings.Server{EnableExec: true}).ServeHTTP(rec, req)
 
-	// A missing after_upload command makes the request fail only if the hook ran.
-	// It avoids a platform-specific helper executable while still exercising the
-	// same path the web UI uses for directory uploads.
-	if rec.Code != http.StatusInternalServerError {
-		t.Fatalf("expected directory upload hook failure to return 500, got %d body=%q", rec.Code, rec.Body.String())
+	// Hook execution is disabled even when saved configuration contains commands.
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected directory upload to succeed with hooks disabled, got %d body=%q", rec.Code, rec.Body.String())
 	}
 	if _, err := os.Stat(filepath.Join(userScope, "created")); err != nil {
 		t.Fatalf("expected directory to be created before its after hook, got %v", err)

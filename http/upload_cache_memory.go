@@ -3,6 +3,7 @@ package fbhttp
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/jellydator/ttlcache/v3"
@@ -29,6 +30,10 @@ type UploadCache interface {
 	// Touch refreshes the TTL for an active upload
 	Touch(filePath string)
 
+	// Lock serializes writes for one upload across concurrent requests and
+	// replicas. The returned function releases the lock.
+	Lock(filePath string) (unlock func(), acquired bool, err error)
+
 	// Close cleans up any resources
 	Close()
 }
@@ -41,7 +46,14 @@ type memoryUploadEntry struct {
 
 // memoryUploadCache is an upload cache for single replica deployments
 type memoryUploadCache struct {
-	cache *ttlcache.Cache[string, memoryUploadEntry]
+	cache   *ttlcache.Cache[string, memoryUploadEntry]
+	locksMu sync.Mutex
+	locks   map[string]*uploadPathLock
+}
+
+type uploadPathLock struct {
+	mu   sync.Mutex
+	refs int
 }
 
 func newMemoryUploadCache() *memoryUploadCache {
@@ -62,7 +74,7 @@ func newMemoryUploadCache() *memoryUploadCache {
 	})
 	go cache.Start()
 
-	return &memoryUploadCache{cache: cache}
+	return &memoryUploadCache{cache: cache, locks: make(map[string]*uploadPathLock)}
 }
 
 func (c *memoryUploadCache) Register(filePath string, fileSize int64, remove func() error) {
@@ -83,6 +95,36 @@ func (c *memoryUploadCache) GetLength(filePath string) (int64, error) {
 
 func (c *memoryUploadCache) Touch(filePath string) {
 	c.cache.Touch(filePath)
+}
+
+func (c *memoryUploadCache) Lock(filePath string) (func(), bool, error) {
+	c.locksMu.Lock()
+	lock := c.locks[filePath]
+	if lock == nil {
+		lock = &uploadPathLock{}
+		c.locks[filePath] = lock
+	}
+	lock.refs++
+	c.locksMu.Unlock()
+
+	if !lock.mu.TryLock() {
+		c.locksMu.Lock()
+		lock.refs--
+		if lock.refs == 0 {
+			delete(c.locks, filePath)
+		}
+		c.locksMu.Unlock()
+		return nil, false, nil
+	}
+	return func() {
+		lock.mu.Unlock()
+		c.locksMu.Lock()
+		lock.refs--
+		if lock.refs == 0 {
+			delete(c.locks, filePath)
+		}
+		c.locksMu.Unlock()
+	}, true, nil
 }
 
 func (c *memoryUploadCache) Close() {

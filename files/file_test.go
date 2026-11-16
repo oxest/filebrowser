@@ -4,6 +4,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/spf13/afero"
@@ -41,9 +42,14 @@ func TestScopedFs(t *testing.T) {
 		if err := os.WriteFile(f, []byte("x"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		fs := NewScopedFs(afero.NewOsFs(), "/")
-
-		if _, err := fs.Stat(f); err != nil {
+		scope := "/"
+		virtualPath := f
+		if volume := filepath.VolumeName(f); volume != "" {
+			scope = volume + string(filepath.Separator)
+			virtualPath = strings.TrimLeft(strings.TrimPrefix(f, volume), `\/`)
+		}
+		fs := NewScopedFs(afero.NewOsFs(), scope)
+		if _, err := fs.Stat(virtualPath); err != nil {
 			t.Fatalf("expected a path under root scope to be accessible, got %v", err)
 		}
 	})

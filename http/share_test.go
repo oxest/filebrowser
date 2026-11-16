@@ -13,8 +13,10 @@ import (
 	"github.com/asdine/storm/v3"
 	"github.com/golang-jwt/jwt/v5"
 
+	fbAuth "github.com/filebrowser/filebrowser/v2/auth"
 	"github.com/filebrowser/filebrowser/v2/settings"
 	"github.com/filebrowser/filebrowser/v2/share"
+	"github.com/filebrowser/filebrowser/v2/storage"
 	"github.com/filebrowser/filebrowser/v2/storage/bolt"
 	"github.com/filebrowser/filebrowser/v2/users"
 )
@@ -75,7 +77,7 @@ func TestAdminShareGetsHandlerMatchesOwnerScope(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to construct request: %v", err)
 	}
-	req.Header.Set("X-Auth", signShareTestToken(t, admin.ID, admin.Username, adminPerm, key))
+	req.Header.Set("X-Auth", signShareTestToken(t, st, admin.ID, admin.Username, adminPerm, key))
 
 	rec := httptest.NewRecorder()
 	handle(shareGetsHandler, "", st, &settings.Server{Root: root}).ServeHTTP(rec, req)
@@ -146,14 +148,21 @@ func TestSharePostHandlerDoesNotLeakSecrets(t *testing.T) {
 	}
 }
 
-func signShareTestToken(t *testing.T, id uint, username string, perm users.Permissions, key []byte) string {
+func signShareTestToken(t *testing.T, st *storage.Storage, id uint, username string, perm users.Permissions, key []byte) string {
 	t.Helper()
+	issued := time.Now()
+	expires := issued.Add(time.Hour)
+	if err := st.Auth.SaveSession(fbAuth.Session{ID: "share-test-session", UserID: id, ExpiresAt: expires.Unix()}); err != nil {
+		t.Fatalf("failed to save test session: %v", err)
+	}
 
 	claims := &authToken{
-		User: userInfo{ID: id, Username: username, Perm: perm},
+		User:                userInfo{ID: id, Username: username, Perm: perm},
+		PasswordFingerprint: passwordFingerprint("pw"),
 		RegisteredClaims: jwt.RegisteredClaims{
-			IssuedAt:  jwt.NewNumericDate(time.Now().Add(-time.Minute)),
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+			IssuedAt:  jwt.NewNumericDate(issued.Add(-time.Minute)),
+			ExpiresAt: jwt.NewNumericDate(expires),
+			ID:        "share-test-session",
 		},
 	}
 	signed, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(key)

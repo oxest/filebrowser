@@ -56,11 +56,31 @@ func keepUploadActive(cache UploadCache, filePath string) func() {
 	}
 }
 
+func tusCachePath(d *data, path string) (string, error) {
+	resolved, err := files.ResolvePath(d.user.Fs, path)
+	if err != nil {
+		return "", err
+	}
+	return d.user.FullPath(resolved), nil
+}
+
 func tusPostHandler(cache UploadCache) handleFunc {
 	return withUser(func(w http.ResponseWriter, r *http.Request, d *data) (int, error) {
 		if !d.user.Perm.Create || !d.Check(r.URL.Path) {
 			return http.StatusForbidden, nil
 		}
+		cachePath, err := tusCachePath(d, r.URL.Path)
+		if err != nil {
+			return errToStatus(err), err
+		}
+		unlock, acquired, err := cache.Lock(cachePath)
+		if err != nil {
+			return http.StatusInternalServerError, err
+		}
+		if !acquired {
+			return http.StatusConflict, nil
+		}
+		defer unlock()
 
 		file, err := files.NewFileInfo(&files.FileOptions{
 			Fs:         d.user.Fs,
@@ -131,7 +151,7 @@ func tusPostHandler(cache UploadCache) handleFunc {
 		// The removal callback deletes an abandoned upload through the user's
 		// scoped filesystem, so eviction cannot follow a symlink out of scope.
 		uploadPath := r.URL.Path
-		cache.Register(file.RealPath(), uploadLength, func() error {
+		cache.Register(cachePath, uploadLength, func() error {
 			return d.user.Fs.Remove(uploadPath)
 		})
 
@@ -164,7 +184,11 @@ func tusHeadHandler(cache UploadCache) handleFunc {
 			return errToStatus(err), err
 		}
 
-		uploadLength, err := cache.GetLength(file.RealPath())
+		cachePath, err := tusCachePath(d, r.URL.Path)
+		if err != nil {
+			return errToStatus(err), err
+		}
+		uploadLength, err := cache.GetLength(cachePath)
 		if err != nil {
 			return http.StatusNotFound, err
 		}
@@ -202,6 +226,19 @@ func tusPatchUpload(w http.ResponseWriter, r *http.Request, d *data, cache Uploa
 		return http.StatusBadRequest, fmt.Errorf("invalid upload offset")
 	}
 
+	cachePath, err := tusCachePath(d, r.URL.Path)
+	if err != nil {
+		return errToStatus(err), err
+	}
+	unlock, acquired, err := cache.Lock(cachePath)
+	if err != nil {
+		return http.StatusInternalServerError, err
+	}
+	if !acquired {
+		return http.StatusConflict, nil
+	}
+	defer unlock()
+
 	file, err := files.NewFileInfo(&files.FileOptions{
 		Fs:         d.user.Fs,
 		Path:       r.URL.Path,
@@ -218,7 +255,7 @@ func tusPatchUpload(w http.ResponseWriter, r *http.Request, d *data, cache Uploa
 		return errToStatus(err), err
 	}
 
-	uploadLength, err := cache.GetLength(file.RealPath())
+	uploadLength, err := cache.GetLength(cachePath)
 	if err != nil {
 		return http.StatusNotFound, err
 	}
@@ -228,7 +265,7 @@ func tusPatchUpload(w http.ResponseWriter, r *http.Request, d *data, cache Uploa
 	}
 
 	// Prevent the upload from being evicted during the transfer
-	stop := keepUploadActive(cache, file.RealPath())
+	stop := keepUploadActive(cache, cachePath)
 	defer stop()
 
 	switch {
@@ -242,7 +279,9 @@ func tusPatchUpload(w http.ResponseWriter, r *http.Request, d *data, cache Uploa
 		)
 	}
 
-	openFile, err := d.user.Fs.OpenFile(r.URL.Path, os.O_WRONLY|os.O_APPEND, d.settings.FileMode)
+	// Seek below controls the offset. O_APPEND is unnecessary and prevents
+	// Truncate from rolling back an over-length chunk on Windows.
+	openFile, err := d.user.Fs.OpenFile(r.URL.Path, os.O_WRONLY, d.settings.FileMode)
 	if err != nil {
 		return http.StatusInternalServerError, fmt.Errorf("could not open file: %w", err)
 	}
@@ -286,7 +325,7 @@ func tusPatchUpload(w http.ResponseWriter, r *http.Request, d *data, cache Uploa
 	w.Header().Set("Upload-Offset", strconv.FormatInt(newOffset, 10))
 
 	if newOffset >= uploadLength {
-		cache.Complete(file.RealPath())
+		cache.Complete(cachePath)
 		_ = d.RunHook(func() error { return nil }, "upload", r.URL.Path, "", d.user)
 	}
 
@@ -299,7 +338,7 @@ func tusDeleteHandler(cache UploadCache) handleFunc {
 			return http.StatusForbidden, nil
 		}
 
-		file, err := files.NewFileInfo(&files.FileOptions{
+		_, err := files.NewFileInfo(&files.FileOptions{
 			Fs:         d.user.Fs,
 			Path:       r.URL.Path,
 			Modify:     d.user.Perm.Modify,
@@ -311,17 +350,29 @@ func tusDeleteHandler(cache UploadCache) handleFunc {
 			return errToStatus(err), err
 		}
 
-		_, err = cache.GetLength(file.RealPath())
+		cachePath, err := tusCachePath(d, r.URL.Path)
+		if err != nil {
+			return errToStatus(err), err
+		}
+		_, err = cache.GetLength(cachePath)
 		if err != nil {
 			return http.StatusNotFound, err
 		}
+		unlock, acquired, err := cache.Lock(cachePath)
+		if err != nil {
+			return http.StatusInternalServerError, err
+		}
+		if !acquired {
+			return http.StatusConflict, nil
+		}
+		defer unlock()
 
 		err = d.user.Fs.RemoveAll(r.URL.Path)
 		if err != nil {
 			return errToStatus(err), err
 		}
 
-		cache.Complete(file.RealPath())
+		cache.Complete(cachePath)
 
 		return http.StatusNoContent, nil
 	})

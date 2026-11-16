@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/filebrowser/filebrowser/v2/diskcache"
@@ -66,6 +67,9 @@ func TestRuleDeniesCaseVariantWhenFsIsCaseInsensitive(t *testing.T) {
 	})
 
 	t.Run("case variant is a distinct path on a case-sensitive filesystem", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("Windows filesystems are case-insensitive")
+		}
 		if rec := get("/secret.TXT", false); rec.Code == http.StatusForbidden {
 			t.Error("GET /secret.TXT = 403 with folding off; the rule must not widen on a case-sensitive filesystem")
 		}

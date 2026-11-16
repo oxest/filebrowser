@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -107,9 +106,8 @@ func resourceDeleteHandler(fileCache FileCache) handleFunc {
 			return errToStatus(err), err
 		}
 
-		err = d.store.Share.DeleteWithPathPrefix(file.Path, d.user.ID)
-		if err != nil {
-			log.Printf("WARNING: Error(s) occurred while deleting associated shares with file: %s", err)
+		if err := deleteSharesUnderPhysicalPath(d, d.user.FullPath(r.URL.Path)); err != nil {
+			return http.StatusInternalServerError, err
 		}
 
 		// delete thumbnails
@@ -152,7 +150,18 @@ func resourcePostHandler(fileCache FileCache) handleFunc {
 			ReadHeader: d.server.TypeDetectionByHeader,
 			Checker:    d,
 		})
-		if err == nil {
+		targetExisted := false
+		switch {
+		case errors.Is(err, afero.ErrFileNotFound) || errors.Is(err, os.ErrNotExist):
+			// The target will be created by this upload.
+		case err != nil:
+			return errToStatus(err), err
+		default:
+			targetExisted = true
+			if file.IsDir {
+				return http.StatusBadRequest, nil
+			}
+
 			if r.URL.Query().Get("override") != "true" {
 				return http.StatusConflict, nil
 			}
@@ -169,7 +178,13 @@ func resourcePostHandler(fileCache FileCache) handleFunc {
 		}
 
 		err = d.RunHook(func() error {
-			info, writeErr := writeFile(d.user.Fs, r.URL.Path, r.Body, d.settings.FileMode, d.settings.DirMode)
+			var info os.FileInfo
+			var writeErr error
+			if targetExisted {
+				info, writeErr = writeFile(d.user.Fs, r.URL.Path, r.Body, d.settings.FileMode, d.settings.DirMode)
+			} else {
+				info, writeErr = writeNewFile(d.user.Fs, r.URL.Path, r.Body, d.settings.FileMode, d.settings.DirMode)
+			}
 			if writeErr != nil {
 				return writeErr
 			}
@@ -178,10 +193,6 @@ func resourcePostHandler(fileCache FileCache) handleFunc {
 			w.Header().Set("ETag", etag)
 			return nil
 		}, "upload", r.URL.Path, "", d.user)
-
-		if err != nil {
-			_ = d.user.Fs.RemoveAll(r.URL.Path)
-		}
 
 		return errToStatus(err), err
 	})
@@ -376,6 +387,39 @@ func writeFile(afs afero.Fs, dst string, in io.Reader, fileMode, dirMode fs.File
 	return info, nil
 }
 
+// writeNewFile creates a previously absent upload target without truncating a
+// file that another request may have created after the initial existence check.
+// If streaming fails, it removes only the file this call created.
+func writeNewFile(afs afero.Fs, dst string, in io.Reader, fileMode, dirMode fs.FileMode) (os.FileInfo, error) {
+	dir, _ := path.Split(dst)
+	if err := afs.MkdirAll(dir, dirMode); err != nil {
+		return nil, err
+	}
+
+	file, err := afs.OpenFile(dst, os.O_RDWR|os.O_CREATE|os.O_EXCL, fileMode)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	cleanup := func(err error) (os.FileInfo, error) {
+		_ = file.Close()
+		_ = afs.Remove(dst)
+		return nil, err
+	}
+	if _, err := io.Copy(file, in); err != nil {
+		return cleanup(err)
+	}
+	if err := file.Sync(); err != nil {
+		return cleanup(err)
+	}
+	info, err := file.Stat()
+	if err != nil {
+		return cleanup(err)
+	}
+	return info, nil
+}
+
 func delThumbs(ctx context.Context, fileCache FileCache, file *files.FileInfo) error {
 	for _, previewSizeName := range PreviewSizeNames() {
 		size, _ := ParsePreviewSize(previewSizeName)
@@ -420,10 +464,40 @@ func patchAction(ctx context.Context, action, src, dst string, d *data, fileCach
 			return err
 		}
 
+		if err := deleteSharesUnderPhysicalPath(d, d.user.FullPath(src)); err != nil {
+			return err
+		}
+
 		return fileutils.MoveFile(d.user.Fs, src, dst, d.settings.FileMode, d.settings.DirMode)
 	default:
 		return fmt.Errorf("unsupported action %s: %w", action, fberrors.ErrInvalidRequestParams)
 	}
+}
+
+// deleteSharesUnderPhysicalPath removes shares for a path and its descendants
+// across every user scope that maps onto the same backing files. Admin
+// operations can remove or rename a file owned and shared by another user.
+func deleteSharesUnderPhysicalPath(d *data, physicalPath string) error {
+	owners, err := d.store.Users.Gets(d.server.Root, d.server.FollowExternalSymlinks)
+	if err != nil && !errors.Is(err, fberrors.ErrNotExist) {
+		return err
+	}
+	physicalPath = filepath.Clean(physicalPath)
+	for _, owner := range owners {
+		ownerRoot := filepath.Clean(owner.FullPath("/"))
+		rel, err := filepath.Rel(ownerRoot, physicalPath)
+		if err != nil {
+			return err
+		}
+		if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+			continue
+		}
+		ownerPath := "/" + filepath.ToSlash(rel)
+		if err := d.store.Share.DeleteWithPathPrefix(ownerPath, owner.ID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // RecursiveEntry is a single file/directory entry returned by the recursive listing endpoint.

@@ -27,6 +27,8 @@ func NewHandler(
 	assetsFs fs.FS,
 ) (http.Handler, error) {
 	server.Clean()
+	server.EnableExec = false
+	server.FollowExternalSymlinks = false
 	server.CaseInsensitiveFs = files.CaseInsensitive(afero.NewOsFs(), server.Root)
 
 	r := mux.NewRouter()
@@ -52,6 +54,7 @@ func NewHandler(
 	api.Handle("/login", monkey(loginHandler(tokenExpirationTime), ""))
 	api.Handle("/signup", monkey(signupHandler, ""))
 	api.Handle("/renew", monkey(renewHandler(tokenExpirationTime), ""))
+	api.Handle("/logout", monkey(logoutHandler, "")).Methods("POST")
 
 	users := api.PathPrefix("/users").Subrouter()
 	users.Handle("", monkey(usersGetHandler, "")).Methods("GET")

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -23,6 +24,9 @@ import (
 // path separator "/", which would manufacture an entry like "../../evil.sh" that
 // escapes the extraction directory on the downloader's machine.
 func TestRawArchiveDoesNotManufactureTraversal(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("backslash is a path separator on Windows, not part of a filename")
+	}
 	root := t.TempDir()
 	userScope := filepath.Join(root, "user")
 	if err := os.MkdirAll(filepath.Join(userScope, "ziptest"), 0o755); err != nil {

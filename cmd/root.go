@@ -374,18 +374,14 @@ func getServerSettings(v *viper.Viper, st *storage.Storage) (*settings.Server, e
 	}
 
 	if server.EnableExec {
-		log.Println("WARNING: Command Runner feature enabled!")
-		log.Println("WARNING: This feature has known security vulnerabilities and should not")
-		log.Println("WARNING: you fully understand the risks involved. For more information")
-		log.Println("WARNING: read https://github.com/filebrowser/filebrowser/issues/5199")
+		log.Println("WARNING: Command Runner is unsupported and has been disabled for security.")
 	}
+	server.EnableExec = false
 
 	if server.FollowExternalSymlinks {
-		log.Println("WARNING: Following external symlinks enabled!")
-		log.Println("WARNING: Symlinks pointing outside a user's scope will be followed,")
-		log.Println("WARNING: which can expose files outside that scope. Only enable this if")
-		log.Println("WARNING: you fully understand and trust the contents of every user scope.")
+		log.Println("WARNING: Following external symlinks is unsupported and has been disabled for security.")
 	}
+	server.FollowExternalSymlinks = false
 
 	if set, err := st.Settings.Get(); err == nil && set.Signup {
 		scope := strings.TrimSpace(set.Defaults.Scope)

@@ -8,6 +8,7 @@ import (
 
 	"github.com/tomasen/realip"
 
+	"github.com/filebrowser/filebrowser/v2/files"
 	"github.com/filebrowser/filebrowser/v2/rules"
 	"github.com/filebrowser/filebrowser/v2/runner"
 	"github.com/filebrowser/filebrowser/v2/settings"
@@ -19,11 +20,12 @@ type handleFunc func(w http.ResponseWriter, r *http.Request, d *data) (int, erro
 
 type data struct {
 	*runner.Runner
-	settings *settings.Settings
-	server   *settings.Server
-	store    *storage.Storage
-	user     *users.User
-	raw      interface{}
+	settings  *settings.Settings
+	server    *settings.Server
+	store     *storage.Storage
+	user      *users.User
+	sessionID string
+	raw       interface{}
 
 	// checkerPrefix is prepended to every path before evaluating rules. It is
 	// set when the user's filesystem has been rebased onto a subdirectory (as
@@ -35,19 +37,32 @@ type data struct {
 
 // Check implements rules.Checker.
 func (d *data) Check(path string) bool {
-	if d.user.HideDotfiles && rules.MatchHidden(d.rulePath(path)) {
-		return false
+	paths := d.rulePaths(path)
+	for _, candidate := range paths {
+		if d.user.HideDotfiles && rules.MatchHidden(candidate) {
+			return false
+		}
 	}
-
-	return d.CheckRules(path)
+	return d.checkPathsAgainstRules(paths)
 }
 
 // CheckRules reports whether the global and user rules allow path. Unlike
 // Check, it ignores HideDotfiles: hiding dotfiles is a display preference, so
 // it must not stop a user from operating on a tree that contains one.
 func (d *data) CheckRules(path string) bool {
-	path = d.rulePath(path)
+	return d.checkPathsAgainstRules(d.rulePaths(path))
+}
 
+func (d *data) checkPathsAgainstRules(paths []string) bool {
+	for _, path := range paths {
+		if !d.pathAllowedByRules(path) {
+			return false
+		}
+	}
+	return true
+}
+
+func (d *data) pathAllowedByRules(path string) bool {
 	allow := true
 	for _, rule := range d.settings.Rules {
 		if rule.Matches(path, d.server.CaseInsensitiveFs) {
@@ -62,6 +77,19 @@ func (d *data) CheckRules(path string) bool {
 	}
 
 	return allow
+}
+
+func (d *data) rulePaths(path string) []string {
+	lexical := d.rulePath(path)
+	paths := []string{lexical}
+	resolved, err := files.ResolvePath(d.user.Fs, path)
+	if err == nil {
+		resolved = d.rulePath(resolved)
+		if resolved != lexical {
+			paths = append(paths, resolved)
+		}
+	}
+	return paths
 }
 
 // rulePath canonicalizes path into the form the rules are written in.

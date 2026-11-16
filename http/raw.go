@@ -114,6 +114,11 @@ func getFiles(d *data, path, commonPath string) ([]archives.FileInfo, error) {
 	}
 
 	var archiveFiles []archives.FileInfo
+	if !info.IsDir() && !info.Mode().IsRegular() {
+		// Do not try to open FIFOs, sockets, or device nodes while building an
+		// archive. Opening a FIFO without a writer blocks the request forever.
+		return nil, nil
+	}
 
 	if path != commonPath {
 		nameInArchive := strings.TrimPrefix(path, commonPath)
@@ -217,6 +222,14 @@ func rawDirHandler(w http.ResponseWriter, r *http.Request, d *data, file *files.
 }
 
 func rawFileHandler(w http.ResponseWriter, r *http.Request, file *files.FileInfo) (int, error) {
+	info, err := file.Fs.Stat(file.Path)
+	if err != nil {
+		return errToStatus(err), err
+	}
+	if !info.Mode().IsRegular() {
+		return http.StatusBadRequest, nil
+	}
+
 	fd, err := file.Fs.Open(file.Path)
 	if err != nil {
 		return http.StatusInternalServerError, err

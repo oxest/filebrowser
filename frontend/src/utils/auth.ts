@@ -76,11 +76,19 @@ export async function login(
 }
 
 export async function renew(jwt: string) {
+  if (renewInFlight) return renewInFlight;
+  renewInFlight = renewToken(jwt).finally(() => {
+    renewInFlight = null;
+  });
+  return renewInFlight;
+}
+
+let renewInFlight: Promise<void> | null = null;
+
+async function renewToken(jwt: string) {
   const res = await fetch(`${baseURL}/api/renew`, {
     method: "POST",
-    headers: {
-      "X-Auth": jwt,
-    },
+    headers: { "X-Auth": jwt },
   });
 
   const body = await res.text();
@@ -116,9 +124,18 @@ export async function signup(username: string, password: string) {
 }
 
 export function logout(reason?: string) {
+  const authStore = useAuthStore();
+  const token = authStore.jwt || localStorage.getItem("jwt");
+  if (token) {
+    void fetch(`${baseURL}/api/logout`, {
+      method: "POST",
+      headers: { "X-Auth": token },
+      keepalive: true,
+    }).catch(() => undefined);
+  }
+
   document.cookie = "auth=; Max-Age=0; Path=/; SameSite=Strict;";
 
-  const authStore = useAuthStore();
   authStore.clearUser();
 
   localStorage.setItem("jwt", "");

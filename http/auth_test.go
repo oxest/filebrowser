@@ -74,12 +74,9 @@ func TestSignupRejectsCollidingNormalizedScope(t *testing.T) {
 	}
 }
 
-// Regression for GHSA-v3jv-rmh2-635j: under proxy auth with a non-default
-// logout page the JWT expiration is waived, because the proxy owns the session
-// lifetime. That exception used to apply to every route on the strength of the
-// token alone, so a token stolen before it expired kept working — and could be
-// renewed — indefinitely. The proxy must still assert the same identity.
-func TestExpiredTokenNeedsProxyAssertion(t *testing.T) {
+// Regression for GHSA-v3jv-rmh2-635j: a proxy assertion must not extend the
+// lifetime of an expired JWT. Expired tokens are rejected on every route.
+func TestExpiredTokenIsRejectedBehindProxy(t *testing.T) {
 	const proxyHeader = "X-Fb-User"
 
 	key := []byte("test-signing-key")
@@ -137,9 +134,9 @@ func TestExpiredTokenNeedsProxyAssertion(t *testing.T) {
 		}
 	})
 
-	t.Run("expired token the proxy still asserts is accepted", func(t *testing.T) {
-		if rec := get(expiredToken, "u"); rec.Code != http.StatusOK {
-			t.Errorf("expired token asserted by the proxy = %d, body=%q; want 200", rec.Code, rec.Body.String())
+	t.Run("expired token remains rejected when the proxy asserts it", func(t *testing.T) {
+		if rec := get(expiredToken, "u"); rec.Code != http.StatusUnauthorized {
+			t.Errorf("expired token asserted by the proxy = %d, body=%q; want 401", rec.Code, rec.Body.String())
 		}
 	})
 

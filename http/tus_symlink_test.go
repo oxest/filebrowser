@@ -12,6 +12,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/spf13/afero"
 
+	fbAuth "github.com/filebrowser/filebrowser/v2/auth"
 	"github.com/filebrowser/filebrowser/v2/files"
 	"github.com/filebrowser/filebrowser/v2/settings"
 	"github.com/filebrowser/filebrowser/v2/storage/bolt"
@@ -57,6 +58,10 @@ func TestTusHandlersRejectSymlinkScopeEscape(t *testing.T) {
 	if err := st.Settings.Save(&settings.Settings{Key: key}); err != nil {
 		t.Fatalf("failed to save settings: %v", err)
 	}
+	expiresAt := time.Now().Add(time.Hour)
+	if err := st.Auth.SaveSession(fbAuth.Session{ID: "tus-symlink-test-session", UserID: 1, ExpiresAt: expiresAt.Unix()}); err != nil {
+		t.Fatalf("failed to save test session: %v", err)
+	}
 	st.Users = &customFSUser{
 		Store: st.Users,
 		fs:    files.NewScopedFs(afero.NewOsFs(), userScope),
@@ -64,10 +69,12 @@ func TestTusHandlersRejectSymlinkScopeEscape(t *testing.T) {
 
 	// Forge a valid auth token for user ID 1.
 	claims := &authToken{
-		User: userInfo{ID: 1, Username: "u", Perm: users.Permissions{Create: true, Modify: true}},
+		User:                userInfo{ID: 1, Username: "u", Perm: users.Permissions{Create: true, Modify: true}},
+		PasswordFingerprint: passwordFingerprint("pw"),
 		RegisteredClaims: jwt.RegisteredClaims{
 			IssuedAt:  jwt.NewNumericDate(time.Now().Add(-time.Minute)),
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+			ExpiresAt: jwt.NewNumericDate(expiresAt),
+			ID:        "tus-symlink-test-session",
 		},
 	}
 	signed, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(key)

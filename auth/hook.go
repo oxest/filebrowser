@@ -1,13 +1,10 @@
 package auth
 
 import (
-	"encoding/json"
 	"errors"
-	"fmt"
 	"log"
 	"net/http"
 	"os"
-	"os/exec"
 	"slices"
 	"strings"
 
@@ -35,47 +32,9 @@ type HookAuth struct {
 	Command  string             `json:"command"`
 }
 
-// Auth authenticates the user via a json in content body.
+// Auth fails closed because external hook authentication is disabled.
 func (a *HookAuth) Auth(r *http.Request, usr users.Store, stg *settings.Settings, srv *settings.Server) (*users.User, error) {
-	var cred hookCred
-
-	if r.Body == nil {
-		return nil, os.ErrPermission
-	}
-
-	err := json.NewDecoder(r.Body).Decode(&cred)
-	if err != nil {
-		return nil, os.ErrPermission
-	}
-
-	a.Users = usr
-	a.Settings = stg
-	a.Server = srv
-	a.Cred = cred
-
-	action, err := a.RunCommand()
-	if err != nil {
-		return nil, err
-	}
-
-	switch action {
-	case "auth":
-		u, err := a.SaveUser()
-		if err != nil {
-			return nil, err
-		}
-		return u, nil
-	case "block":
-		return nil, os.ErrPermission
-	case "pass":
-		u, err := a.Users.Get(a.Server.Root, a.Server.FollowExternalSymlinks, a.Cred.Username)
-		if err != nil || !users.CheckPwd(a.Cred.Password, u.Password) {
-			return nil, os.ErrPermission
-		}
-		return u, nil
-	default:
-		return nil, fmt.Errorf("invalid hook action: %s", action)
-	}
+	return nil, os.ErrPermission
 }
 
 // LoginPage tells that hook auth requires a login page.
@@ -83,21 +42,9 @@ func (a *HookAuth) LoginPage() bool {
 	return true
 }
 
-// RunCommand starts the hook command and returns the action
+// RunCommand returns a permission error because hook execution is disabled.
 func (a *HookAuth) RunCommand() (string, error) {
-	command := strings.Split(a.Command, " ")
-
-	cmd := exec.Command(command[0], command[1:]...)
-	cmd.Env = append(os.Environ(), fmt.Sprintf("USERNAME=%s", a.Cred.Username))
-	cmd.Env = append(cmd.Env, fmt.Sprintf("PASSWORD=%s", a.Cred.Password))
-	out, err := cmd.Output()
-	if err != nil {
-		return "", err
-	}
-
-	a.GetValues(string(out))
-
-	return a.Fields.Values["hook.action"], nil
+	return "", os.ErrPermission
 }
 
 // GetValues creates a map with values from the key-value format string
